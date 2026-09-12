@@ -97,7 +97,7 @@ while True:
     (0, 255, 0), 2
   )
   cv2.putText(
-    f"Frames: {frame_count}",
+    f"Frames: {frame_counts}",
     (20, 105),
     cv2.FONT_HERSHEY_SIMPLEX,0.8,
     (0, 255, 0), 2
