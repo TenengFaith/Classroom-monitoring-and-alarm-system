@@ -97,26 +97,46 @@ class ClassroomDetectionPipeline:
 
 
 if __name__ == "__main__":
-    cap = cv2.VideoCapture(0)
+    VIDEO_PATH = "sample-video.mp4"
+
+    cap = cv2.VideoCapture(VIDEO_PATH)
+
+    if not cap.isOpened():
+        print(f"Error: Could not open video file {VIDEO_PATH}")
+        exit()
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps == 0 or fps is None:
+        fps = 30.0
+
+    frame_duration_ms = int(1000 / fps)
+    
     pipeline = ClassroomDetectionPipeline()
 
-    start_time = time.time()
+    frame_counter = 0
 
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
-            print("Failed to grab frame or video ended.")
+            print("Finished processing all video frames.")
             break
 
-        timestamp_ms = int((time.time() - start_time) * 1000)
+        timestamp_ms = int(frame_counter * frame_duration_ms)
+        frame_counter += 1
+
         detections = pipeline.process_frame(frame, timestamp_ms)
 
-        print(f"Frame {timestamp_ms}ms | Poses: {len(detections['poses'])} | Faces: {len(detections['faces'])}")
+        h, w, _ = frame.shape
+        for pose in detections["poses"]:
+            bbox = pose["bbox"]
+            x1, y1 = int(bbox["x_min"] * w), int(bbox["y_min"] * h)
+            x2, y2 = int(bbox["x_max"] * w), int(bbox["y_max"] * h)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-        # Display the video feed window
-        cv2.imshow("Classroom Monitor", frame)
+        print(f"Frame {frame_counter} | Timestamp: {timestamp_ms}ms | Poses: {len(detections['poses'])} | Faces: {len(detections['faces'])}")
 
-        # Press 'q' to exit the preview window
+        cv2.imshow("Classroom Video Processing (Track 2 Test)", frame)
+
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
