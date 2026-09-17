@@ -1,10 +1,11 @@
 ﻿"""
-Track 3 & Track 4 Integrated Pipeline
+Track 3 end-to-end smoke test with video-file support.
 """
 
 import os
 import sys
 import time
+
 import cv2
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14,9 +15,6 @@ from track3.adapter import adapt
 from track3.trackers.centroid_tracker import CentroidTracker
 from track3.trackers.suspicion_tracker import StudentSuspicionTracker
 
-# Track 4 Imports
-from track4 import Alarm, AlertLogger, draw_flag_overlay, draw_dashboard_hud, spotlight_bbox
-
 
 def draw_tracked(frame, bbox_norm, student_id, score=None, alert=False):
     h, w = frame.shape[:2]
@@ -24,19 +22,13 @@ def draw_tracked(frame, bbox_norm, student_id, score=None, alert=False):
     y1 = int(bbox_norm["y_min"] * h)
     x2 = int(bbox_norm["x_max"] * w)
     y2 = int(bbox_norm["y_max"] * h)
-    
-    # Standard Track 3 box for normal students
-    if not alert:
-        color = (0, 255, 0)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        label = f"Student #{student_id}"
-        if score is not None:
-            label += f" score={score:.2f}"
-        cv2.putText(frame, label, (x1, max(y1 - 8, 20)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-    else:
-        # Track 4 Flag Overlay (Red Cross Box + FLAGGED label)
-        draw_flag_overlay(frame, (x1, y1, x2, y2), student_id, score)
+    color = (0, 0, 255) if alert else (0, 255, 0)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+    label = f"Student #{student_id}"
+    if score is not None:
+        label += f"  score={score:.2f}"
+    cv2.putText(frame, label, (x1, max(y1 - 8, 20)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
 
 def resolve_source(argv):
@@ -62,10 +54,6 @@ def main():
     pipeline = ClassroomDetectionPipeline()
     tracker = CentroidTracker(max_distance=0.15, max_missed_frames=20)
     suspicion = StudentSuspicionTracker(threshold=0.6, required_frames=15)
-
-    # Initialize Track 4 Components
-    alarm = Alarm(sound_path="alarm.mp3", cooldown_sec=3)
-    logger = AlertLogger(log_filepath="classroom_alerts.csv")
 
     frame_idx = 0
     processed = 0
@@ -98,9 +86,6 @@ def main():
                     idx_to_record[ci] = r
                     ci += 1
 
-            # Track live scores for Track 4 Dashboard HUD
-            active_student_scores = {}
-
             for det_idx, student_id in assignments.items():
                 seen_ids.add(student_id)
                 rec = idx_to_record[det_idx]
@@ -110,28 +95,16 @@ def main():
                     torso_lean_deg=rec["torso_lean_deg"],
                     object_near_hand=rec["object_near_hand"],
                 )
-                
-                active_student_scores[student_id] = score
-
-                # --- TRACK 4 ALERT HANDLING ---
-                if should_alert:
-                    # 1. Trigger background non-blocking alarm audio
-                    alarm.trigger()
-                    # 2. Log alert timestamp and details to CSV
-                    logger.log_alert(student_id, score)
-
-                # 3. Draw tracked student box or flagged red cross overlay
                 draw_tracked(frame, rec["bbox"], student_id,
                              score=score, alert=should_alert)
 
             processed += 1
             elapsed = max(time.time() - start, 1e-6)
             fps = processed / elapsed
+            cv2.putText(frame, f"FPS: {fps:.1f}  IDs seen: {len(seen_ids)}",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
 
-            # --- TRACK 4 HUD OVERLAY ---
-            draw_dashboard_hud(frame, active_student_scores, fps=fps, total_seen=len(seen_ids))
-
-            cv2.imshow("Classroom Monitoring Dashboard (Track 3 + Track 4)", frame)
+            cv2.imshow("Track 3 - Stable IDs", frame)
             if (cv2.waitKey(1) & 0xFF) == ord("q"):
                 break
     finally:
