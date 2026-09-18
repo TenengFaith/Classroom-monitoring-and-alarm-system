@@ -1,45 +1,15 @@
 import cv2
-import mediapipe as mp
+import os
 import time
+from ultralytics import YOLO
 
 class ClassroomDetectionPipeline:
-    def __init__(self, pose_model_path="pose_landmarker_full.task", face_model_path="face_landmarker.task"):
-        BaseOptions = mp.tasks.BaseOptions
-        
-        PoseLandmarker = mp.tasks.vision.PoseLandmarker
-        PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
-        
-        FaceLandmarker = mp.tasks.vision.FaceLandmarker
-        FaceLandmarkerOptions = mp.tasks.vision.FaceLandmarkerOptions
-        
-        RunningMode = mp.tasks.vision.RunningMode
-
-        pose_options = PoseLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=pose_model_path),
-            running_mode=RunningMode.VIDEO,
-            num_poses=10,
-            min_pose_detection_confidence=0.5,
-            min_pose_presence_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-        self.pose_detector = PoseLandmarker.create_from_options(pose_options)
-
-        face_options = FaceLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=face_model_path),
-            running_mode=RunningMode.VIDEO,
-            num_faces=10,
-            output_face_blendshapes=True,
-            min_face_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-        self.face_detector = FaceLandmarker.create_from_options(face_options)
+    def __init__(self, yolo_model_path="yolov8n.pt", confidence_threshold=0.35):
+        self.confidence_threshold = confidence_threshold
+        self.model = YOLO(yolo_model_path)
 
     def process_frame(self, frame_bgr, timestamp_ms):
-        rgb_frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-
-        pose_result = self.pose_detector.detect_for_video(mp_image, timestamp_ms)
-        face_result = self.face_detector.detect_for_video(mp_image, timestamp_ms)
+        results = self.model(frame_bgr, conf=self.confidence_threshold, verbose=False)[0]
 
         structured_output = {
             "timestamp_ms": timestamp_ms,
@@ -47,57 +17,42 @@ class ClassroomDetectionPipeline:
             "faces": []
         }
 
-        if pose_result and pose_result.pose_landmarks:
-            for pose_idx, landmarks in enumerate(pose_result.pose_landmarks):
-                landmarks_list = [
-                    {"x": lm.x, "y": lm.y, "z": lm.z, "visibility": lm.visibility}
-                    for lm in landmarks
-                ]
-                
-                xs = [lm.x for lm in landmarks]
-                ys = [lm.y for lm in landmarks]
+        h, w, _ = frame_bgr.shape
+        detection_idx = 0
+
+        for box in results.boxes:
+            cls_id = int(box.cls[0])
+            
+            if cls_id == 0:
+                confidence = float(box.conf[0])
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+
                 bbox = {
-                    "x_min": min(xs),
-                    "y_min": min(ys),
-                    "x_max": max(xs),
-                    "y_max": max(ys)
+                    "x_min": x1 / w,
+                    "y_min": y1 / h,
+                    "x_max": x2 / w,
+                    "y_max": y2 / h,
+                    "confidence": confidence
                 }
 
                 structured_output["poses"].append({
-                    "pose_id": pose_idx,
+                    "pose_id": detection_idx,
                     "bbox": bbox,
-                    "landmarks": landmarks_list
+                    "landmarks": []
                 })
-
-        if face_result and face_result.face_landmarks:
-            for face_idx, landmarks in enumerate(face_result.face_landmarks):
-                landmarks_list = [
-                    {"x": lm.x, "y": lm.y, "z": lm.z}
-                    for lm in landmarks
-                ]
-
-                blendshapes_dict = {}
-                if face_result.face_blendshapes and face_idx < len(face_result.face_blendshapes):
-                    blendshapes_dict = {
-                        category.category_name: category.score
-                        for category in face_result.face_blendshapes[face_idx]
-                    }
-
-                structured_output["faces"].append({
-                    "face_id": face_idx,
-                    "landmarks": landmarks_list,
-                    "blendshapes": blendshapes_dict
-                })
+                
+                detection_idx += 1
 
         return structured_output
 
     def close(self):
-        self.pose_detector.close()
-        self.face_detector.close()
+        pass
 
 
 if __name__ == "__main__":
-    VIDEO_PATH = "sample-video.mp4"
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    VIDEO_PATH = os.path.join(SCRIPT_DIR, "sample-video.mp4")
+    MODEL_PATH = os.path.join(SCRIPT_DIR, "yolov8n.pt")
 
     cap = cv2.VideoCapture(VIDEO_PATH)
 
@@ -110,8 +65,7 @@ if __name__ == "__main__":
         fps = 30.0
 
     frame_duration_ms = int(1000 / fps)
-    
-    pipeline = ClassroomDetectionPipeline()
+    pipeline = ClassroomDetectionPipeline(yolo_model_path=MODEL_PATH)
 
     frame_counter = 0
 
@@ -127,15 +81,25 @@ if __name__ == "__main__":
         detections = pipeline.process_frame(frame, timestamp_ms)
 
         h, w, _ = frame.shape
-        for pose in detections["poses"]:
-            bbox = pose["bbox"]
+        for person in detections["poses"]:
+            bbox = person["bbox"]
             x1, y1 = int(bbox["x_min"] * w), int(bbox["y_min"] * h)
             x2, y2 = int(bbox["x_max"] * w), int(bbox["y_max"] * h)
+            
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(
+                frame, 
+                f"Person {bbox['confidence']:.2f}", 
+                (x1, max(y1 - 10, 15)), 
+                cv2.FONT_HERSHEY_SIMPLEX, 
+                0.5, 
+                (0, 255, 0), 
+                2
+            )
 
-        print(f"Frame {frame_counter} | Timestamp: {timestamp_ms}ms | Poses: {len(detections['poses'])} | Faces: {len(detections['faces'])}")
+        print(f"Frame {frame_counter} | Timestamp: {timestamp_ms}ms | Persons Detected: {len(detections['poses'])}")
 
-        cv2.imshow("Classroom Video Processing (Track 2 Test)", frame)
+        cv2.imshow("Classroom YOLO Detection (Track 2 Test)", frame)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
