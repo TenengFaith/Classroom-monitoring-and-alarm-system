@@ -1,15 +1,16 @@
 
-import os
 import sys
-import time
 
 import cv2
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from detection_model import ClassroomDetectionPipeline
-from track3.adapter import adapt
-from track3.trackers.centroid_tracker import CentroidTracker
+try:
+    from detection_model import ClassroomDetectionPipeline
+    from track3.adapter import adapt
+    from track3.trackers.centroid_tracker import CentroidTracker
+except ImportError:  # pragma: no cover
+    from ..detection_model import ClassroomDetectionPipeline
+    from .adapter import adapt
+    from .trackers.centroid_tracker import CentroidTracker
 
 
 def main():

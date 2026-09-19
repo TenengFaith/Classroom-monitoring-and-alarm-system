@@ -1,19 +1,27 @@
-﻿"""
-Track 3 end-to-end smoke test with video-file support.
-"""
+﻿"""Track 3 end-to-end smoke test with video-file support."""
 
-import os
+import argparse
 import sys
 import time
+import traceback
+from pathlib import Path
 
 import cv2
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from detection_model import ClassroomDetectionPipeline
-from track3.adapter import adapt
-from track3.trackers.centroid_tracker import CentroidTracker
-from track3.trackers.suspicion_tracker import StudentSuspicionTracker
+try:
+    from detection_model import ClassroomDetectionPipeline
+    from track3.adapter import adapt
+    from track3.trackers.centroid_tracker import CentroidTracker
+    from track3.trackers.suspicion_tracker import StudentSuspicionTracker
+except ImportError:  # pragma: no cover
+    from ..detection_model import ClassroomDetectionPipeline
+    from .adapter import adapt
+    from .trackers.centroid_tracker import CentroidTracker
+    from .trackers.suspicion_tracker import StudentSuspicionTracker
 
 
 def draw_tracked(frame, bbox_norm, student_id, score=None, alert=False):
@@ -40,8 +48,31 @@ def resolve_source(argv):
     return arg, True
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Track 3 classroom detection smoke test")
+    parser.add_argument("source", nargs="?", default=None, help="Video file path or camera index")
+    parser.add_argument("--video", dest="video_path", help="Path to a recorded video file")
+    parser.add_argument("--camera", type=int, default=0, help="Camera index to use when no video file is provided")
+    parser.add_argument("--limit-frames", type=int, default=0, help="Stop after N frames for reproducible testing")
+    return parser.parse_args()
+
+
 def main():
-    source, is_file = resolve_source(sys.argv)
+    args = parse_args()
+    source = args.video_path if args.video_path else args.source
+    if source is None:
+        source, is_file = resolve_source(sys.argv)
+    elif source.isdigit():
+        source = int(source)
+        is_file = False
+    else:
+        is_file = True
+
+    if source is None:
+        source = args.camera
+        is_file = False
+
+    print(f"Opening source: {source!r} | file_mode={is_file}")
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         print(f"Could not open source: {source!r}")
@@ -67,36 +98,48 @@ def main():
                 print("End of stream.")
                 break
 
+            if args.limit_frames and processed >= args.limit_frames:
+                print(f"Frame limit reached ({args.limit_frames}).")
+                break
+
             if is_file:
                 timestamp_ms = int((frame_idx / fps_declared) * 1000)
             else:
                 timestamp_ms = int((time.time() - start) * 1000)
             frame_idx += 1
 
-            raw = pipeline.process_frame(frame, timestamp_ms)
-            records = adapt(raw)
+            try:
+                raw = pipeline.process_frame(frame, timestamp_ms)
+                print(f"frame={frame_idx:5d} detection_count={len(raw.get('poses', []))} faces={len(raw.get('faces', []))}")
 
-            centroids = [r["centroid"] for r in records if r["centroid"] is not None]
-            assignments = tracker.update(centroids)
+                records = adapt(raw)
+                print(f"frame={frame_idx:5d} adapted_records={len(records)}")
 
-            idx_to_record = {}
-            ci = 0
-            for r in records:
-                if r["centroid"] is not None:
-                    idx_to_record[ci] = r
-                    ci += 1
+                centroids = [r["centroid"] for r in records if r["centroid"] is not None]
+                assignments = tracker.update(centroids)
+                print(f"frame={frame_idx:5d} tracker_assignments={assignments}")
 
-            for det_idx, student_id in assignments.items():
-                seen_ids.add(student_id)
-                rec = idx_to_record[det_idx]
-                score, should_alert = suspicion.update(
-                    student_id=student_id,
-                    head_yaw_deg=rec["head_yaw_deg"],
-                    torso_lean_deg=rec["torso_lean_deg"],
-                    object_near_hand=rec["object_near_hand"],
-                )
-                draw_tracked(frame, rec["bbox"], student_id,
-                             score=score, alert=should_alert)
+                idx_to_record = {}
+                ci = 0
+                for r in records:
+                    if r["centroid"] is not None:
+                        idx_to_record[ci] = r
+                        ci += 1
+
+                for det_idx, student_id in assignments.items():
+                    seen_ids.add(student_id)
+                    rec = idx_to_record[det_idx]
+                    score, should_alert = suspicion.update(
+                        student_id=student_id,
+                        head_yaw_deg=rec["head_yaw_deg"],
+                        torso_lean_deg=rec["torso_lean_deg"],
+                        object_near_hand=rec["object_near_hand"],
+                    )
+                    print(f"frame={frame_idx:5d} student_id={student_id} score={score:.2f} alert={should_alert}")
+                    draw_tracked(frame, rec["bbox"], student_id, score=score, alert=should_alert)
+            except Exception:
+                print(f"ERROR on frame {frame_idx}: ")
+                traceback.print_exc()
 
             processed += 1
             elapsed = max(time.time() - start, 1e-6)
