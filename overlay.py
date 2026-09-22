@@ -1,50 +1,72 @@
 import cv2
-import numpy as np
 
+def draw_student_overlay(frame, bbox_norm, student_id, score=0.0, alert=False):
+    h, w = frame.shape[:2]
+    x1 = int(bbox_norm["x_min"] * w)
+    y1 = int(bbox_norm["y_min"] * h)
+    x2 = int(bbox_norm["x_max"] * w)
+    y2 = int(bbox_norm["y_max"] * h)
 
-def draw_flag_overlay(frame, bbox, student_id, score, is_flagged):
-    """Draws bounding box and metadata label above student."""
-    x1, y1, x2, y2 = bbox
-    color = (0, 0, 255) if is_flagged else (0, 255, 0)  # Red if FLAGGED, Green if NORMAL
-    thickness = 3 if is_flagged else 2
+    # Determine status label and color
+    if alert or score >= 0.60:
+        color = (0, 0, 255)      # Red
+        status = "ALERT"
+    elif score >= 0.30:
+        color = (0, 165, 255)    # Orange
+        status = "WATCH"
+    else:
+        color = (0, 255, 0)      # Green
+        status = "OK"
 
+    thickness = 2
+    
+
+    # 1. Draw Bounding Box
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
 
-    status_str = "FLAGGED" if is_flagged else "NORMAL"
-    label = f"ID #{student_id} | {status_str} ({score:.2f})"
+    # 2. Draw Red 'X' inside the box if suspicious score is high (>= 0.60 / alert)
+    if alert or score >= 0.60:
+        cv2.line(frame, (x1, y1), (x2, y2), (0, 0, 255), thickness)
+        cv2.line(frame, (x1, y2), (x2, y1), (0, 0, 255), thickness)
 
-    # Floating background label box
-    label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-    lbl_w, lbl_h = label_size
-    lbl_y1 = max(0, y1 - lbl_h - 10)
-
-    cv2.rectangle(frame, (x1, lbl_y1), (x1 + lbl_w + 10, lbl_y1 + lbl_h + 8), color, -1)
-    cv2.putText(frame, label, (x1 + 5, lbl_y1 + lbl_h + 3), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
-
-def apply_spotlight(frame, flagged_bboxes, dim_factor=0.3):
-    """Dims non-suspicious areas while spotlighting flagged students."""
-    if not flagged_bboxes:
-        return frame
-
-    mask = np.zeros_like(frame, dtype=np.uint8)
-    for (x1, y1, x2, y2) in flagged_bboxes:
-        cv2.rectangle(mask, (x1, y1), (x2, y2), (255, 255, 255), -1)
-
-    dimmed = (frame * dim_factor).astype(np.uint8)
-    return np.where(mask == 255, frame, dimmed)
+    # 3. Draw Text Label directly above or at top-left of the bounding box
+    label = f"#{student_id} {status} score={score:.2f}"
+    text_pos_y = max(y1 - 8, 20)
+    
+    cv2.putText(
+        frame,
+        label,
+        (x1, text_pos_y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        color,
+        2,
+        cv2.LINE_AA
+    )
 
 
-def draw_dashboard(frame, fps, active_count, alarm_active):
-    """Draws top HUD status bar."""
-    h, w, _ = frame.shape
-    hud_bg = frame[0:40, 0:w]
-    dark_overlay = (hud_bg * 0.2).astype(np.uint8)
-    frame[0:40, 0:w] = dark_overlay
+def draw_dashboard_hud(frame, fps, active_count, total_ids, has_alert=False):
+    # Top overlay text matching screenshot style in Cyan (BGR: 255, 255, 0)
+    hud_text = f"FPS: {fps:.1f}  IDs seen: {total_ids}"
+    cv2.putText(
+        frame,
+        hud_text,
+        (10, 35),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.9,
+        (255, 255, 0),
+        2,
+        cv2.LINE_AA
+    )
 
-    cv2.putText(frame, f"FPS: {fps:.1f}", (15, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-    cv2.putText(frame, f"Active Students: {active_count}", (160, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-    status_txt = "ALARM ACTIVE" if alarm_active else "SYSTEM SECURE"
-    status_col = (0, 0, 255) if alarm_active else (0, 255, 0)
-    cv2.putText(frame, f"Status: {status_txt}", (400, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_col, 2)
+    if has_alert:
+        cv2.putText(
+            frame,
+            "[!] HIGH SUSPICION DETECTED",
+            (frame.shape[1] - 430, 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 0, 255),
+            2,
+            cv2.LINE_AA
+        )
