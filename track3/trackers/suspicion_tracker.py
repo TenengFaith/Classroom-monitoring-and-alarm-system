@@ -3,6 +3,7 @@ class StudentSuspicionTracker:
         self.threshold = threshold
         self.required_frames = required_frames
         self.debounce_counters = {}
+        self.scores = {}
 
     def compute_score(self, head_yaw_deg, torso_lean_deg, object_near_hand):
         score = 0.0
@@ -30,4 +31,22 @@ class StudentSuspicionTracker:
         count = count + 1 if is_over else 0
         self.debounce_counters[student_id] = count
 
-        return score, count >= self.required_frames
+        should_alert = count >= self.required_frames
+        return score, should_alert
+
+    def update_student_suspicion(self, student_id, yaw_score, lean_score):
+        current_score = self.scores.get(student_id, 0.0)
+        frame_suspicion = (yaw_score * 0.7) + (lean_score * 0.3)
+
+        if frame_suspicion > 0.3:
+            current_score = min(1.0, current_score + 0.08)
+        else:
+            current_score = max(0.0, current_score - 0.02)
+
+        self.scores[student_id] = current_score
+
+        if current_score >= self.threshold:
+            if hasattr(self, 'trigger_alarm'):
+                self.trigger_alarm(student_id)
+
+        return current_score
