@@ -1,7 +1,6 @@
 import cv2
 import os
 import time
-import numpy as np
 import mediapipe as mp
 from ultralytics import YOLO
 
@@ -12,12 +11,14 @@ class ClassroomDetectionPipeline:
                  yolo_model_path="yolov8n.pt",
                  pose_model_path="pose_landmarker_lite.task",
                  face_model_path="face_landmarker.task",
-                 confidence_threshold=0.15,  # Lowered threshold for small objects
+                 confidence_threshold=0.25,
+                 crop_phone_conf=0.15,
                  crop_padding=0.05,
-                 yolo_input_width=1280,      # Increased input resolution
+                 yolo_input_width=1280,
                  crop_size_px=256,
-                 landmark_every_n_frames=3):
+                 landmark_every_n_frames=1):  # Run landmarks per frame for accurate hand tracking
         self.confidence_threshold = confidence_threshold
+        self.crop_phone_conf = crop_phone_conf
         self.crop_padding = crop_padding
         self.yolo_input_width = yolo_input_width
         self.crop_size_px = crop_size_px
@@ -66,6 +67,70 @@ class ClassroomDetectionPipeline:
             return None, (0, 0)
         return frame[cy1:cy2, cx1:cx2], (cx1, cy1)
 
+    def _is_phone_held_by_hand(self, phone_px_box, pose_landmarks, crop_w, crop_h):
+        """
+        Verifies if the phone bounding box is held in a hand by checking proximity
+        to MediaPipe hand keypoints: Wrists (15, 16), Pinkies (17, 18), 
+        Index fingers (19, 20), and Thumbs (21, 22).
+        """
+        if not pose_landmarks or len(pose_landmarks) < 23:
+            # If hand landmarks are unobserved, retain detection if inside upper crop
+            return True
+
+        px1, py1, px2, py2 = phone_px_box
+
+        # Indices corresponding to wrists and hand keypoints in MediaPipe Pose
+        hand_indices = [15, 16, 17, 18, 19, 20, 21, 22]
+
+        # Tolerance margin (in pixels) around phone box to account for hand grasp
+        margin = 25.0
+
+        for idx in hand_indices:
+            lm = pose_landmarks[idx]
+            if lm.get("visibility", 1.0) < 0.3:
+                continue
+
+            hx = lm["x"] * crop_w
+            hy = lm["y"] * crop_h
+
+            # Check if hand landmark falls inside or near the phone bounding box
+            if (px1 - margin) <= hx <= (px2 + margin) and (py1 - margin) <= hy <= (py2 + margin):
+                return True
+
+        return False
+
+    def _detect_phone_in_crop(self, crop, cx1, cy1, frame_w, frame_h, pose_landmarks):
+        crop_h, crop_w = crop.shape[:2]
+        if crop_h < 30 or crop_w < 30:
+            return []
+
+        crop_results = self.yolo(crop, conf=self.crop_phone_conf, classes=[67], verbose=False)[0]
+
+        detected_phones = []
+        for box in crop_results.boxes:
+            conf = float(box.conf[0])
+            px1, py1, px2, py2 = box.xyxy[0].tolist()
+
+            # Verify that the detected phone is held in hand
+            if not self._is_phone_held_by_hand((px1, py1, px2, py2), pose_landmarks, crop_w, crop_h):
+                continue
+
+            # Convert crop coordinates back to global frame
+            gx1 = cx1 + px1
+            gy1 = cy1 + py1
+            gx2 = cx1 + px2
+            gy2 = cy1 + py2
+
+            detected_phones.append({
+                "x_min": gx1 / frame_w,
+                "y_min": gy1 / frame_h,
+                "x_max": gx2 / frame_w,
+                "y_max": gy2 / frame_h,
+                "confidence": conf
+            })
+
+        return detected_phones
+
     def _run_landmarks(self, crop, crop_ts):
         h, w = crop.shape[:2]
         if w > self.crop_size_px:
@@ -101,52 +166,6 @@ class ClassroomDetectionPipeline:
 
         return pose_out, face_out
 
-    def check_phone_posture(self, landmarks, crop_offset, crop_size, frame_shape):
-        """
-        Detects if head is bent forward and hands (wrists 15, 16) are close together.
-        Returns a bounding box around the hands if true.
-        """
-        if len(landmarks) < 17:
-            return None
-
-        # MediaPipe Keypoints: 0=Nose, 11=L_Shoulder, 12=R_Shoulder, 15=L_Wrist, 16=R_Wrist
-        nose = landmarks[0]
-        l_sh = landmarks[11]
-        r_sh = landmarks[12]
-        l_wrist = landmarks[15]
-        r_wrist = landmarks[16]
-
-        shoulder_y = (l_sh['y'] + r_sh['y']) / 2.0
-
-        # Check if head is lowered towards chest
-        head_bent = nose['y'] > (shoulder_y - 0.05)
-
-        # Check wrist proximity (normalized to crop)
-        wrist_dist = np.sqrt((l_wrist['x'] - r_wrist['x'])**2 + (l_wrist['y'] - r_wrist['y'])**2)
-        hands_together = wrist_dist < 0.25
-
-        if head_bent and hands_together:
-            cx1, cy1 = crop_offset
-            cw, ch = crop_size
-            fw, fh = frame_shape[1], frame_shape[0]
-
-            # Calculate hand bounding box in absolute pixels
-            hx1 = int(cx1 + min(l_wrist['x'], r_wrist['x']) * cw - 20)
-            hy1 = int(cy1 + min(l_wrist['y'], r_wrist['y']) * ch - 20)
-            hx2 = int(cx1 + max(l_wrist['x'], r_wrist['x']) * cw + 20)
-            hy2 = int(cy1 + max(l_wrist['y'], r_wrist['y']) * ch + 20)
-
-            # Normalize bounding box format
-            return {
-                "x_min": max(0, hx1) / fw,
-                "y_min": max(0, hy1) / fh,
-                "x_max": min(fw, hx2) / fw,
-                "y_max": min(fh, hy2) / fh,
-                "confidence": 0.85,
-                "heuristic": True
-            }
-        return None
-
     def process_frame(self, frame_bgr, timestamp_ms):
         self._frame_count += 1
         do_landmarks = (self._frame_count % self.landmark_every_n_frames == 0)
@@ -163,7 +182,6 @@ class ClassroomDetectionPipeline:
         else:
             yolo_input = frame_bgr
 
-        # Lowered confidence to catch small/occluded phone boxes
         results = self.yolo(yolo_input, conf=self.confidence_threshold,
                             classes=[0, 67], verbose=False)[0]
 
@@ -211,15 +229,13 @@ class ClassroomDetectionPipeline:
                 else:
                     pose_lm, face_lm = [], []
 
-                # Fallback check for bent-head phone usage
-                phone_box = self.check_phone_posture(
-                    pose_lm, (cx1, cy1), (crop_w, crop_h), frame_bgr.shape
-                )
-                if phone_box:
+                # Scan crop for phone and verify hand association
+                crop_phones = self._detect_phone_in_crop(crop, cx1, cy1, w_full, h_full, pose_lm)
+                for phone_bbox in crop_phones:
                     structured["objects"].append({
                         "object_id": object_idx,
                         "type": "cell phone",
-                        "bbox": phone_box
+                        "bbox": phone_bbox
                     })
                     object_idx += 1
 
@@ -240,14 +256,6 @@ class ClassroomDetectionPipeline:
                     })
 
                 person_idx += 1
-
-            elif cls_id == 67:
-                structured["objects"].append({
-                    "object_id": object_idx,
-                    "type": "cell phone",
-                    "bbox": bbox_norm,
-                })
-                object_idx += 1
 
         return structured
 
@@ -291,7 +299,7 @@ if __name__ == "__main__":
 
             fh, fw = frame.shape[:2]
 
-            # Draw Persons (Green)
+            # Draw Person Bounding Boxes (Green)
             for person in det["poses"]:
                 b = person["bbox"]
                 x1 = int(b["x_min"] * fw)
@@ -300,7 +308,7 @@ if __name__ == "__main__":
                 y2 = int(b["y_max"] * fh)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-            # Draw Cell Phones (Purple)
+            # Draw Phones Held in Hand (Purple)
             for obj in det["objects"]:
                 b = obj["bbox"]
                 x1 = int(b["x_min"] * fw)
@@ -309,8 +317,8 @@ if __name__ == "__main__":
                 y2 = int(b["y_max"] * fh)
 
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 255), 2)
-                label = "Phone (Posture)" if b.get("heuristic") else f"Phone {b['confidence']:.2f}"
-                cv2.putText(frame, label, (x1, max(y1 - 10, 15)),
+                cv2.putText(frame, f"Phone {b['confidence']:.2f}",
+                            (x1, max(y1 - 10, 15)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
 
             cv2.imshow("Classroom Detection", frame)
