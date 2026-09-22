@@ -1,47 +1,47 @@
 import os
+import sys
 import time
 import threading
 
+# Try using pygame for cross-platform MP3 audio playback
 try:
     import pygame
-    PYGAME_AVAILABLE = True
+    pygame.mixer.init()
+    HAS_PYGAME = True
 except ImportError:
-    PYGAME_AVAILABLE = False
+    HAS_PYGAME = False
 
 
-class Alarm:
-    """
-    Asynchronous sound alarm manager with a cooldown period.
-    """
-    def __init__(self, sound_path="alarm.mp3", cooldown_sec=2.0):
-        self.sound_path = sound_path
+class AlarmManager:
+    """Handles non-blocking MP3 audio alerts with cooldown protection."""
+    def __init__(self, audio_file="alarm.mp3", cooldown_sec=1.5):
+        self.audio_file = audio_file
         self.cooldown_sec = cooldown_sec
-        self.last_played_time = 0.0
+        self.last_triggered = 0.0
 
-        if PYGAME_AVAILABLE and os.path.exists(self.sound_path):
-            pygame.mixer.init()
-            self.sound = pygame.mixer.Sound(self.sound_path)
-            self.audio_ready = True
-            print(f"[ALARM] Sound engine ready with file: '{self.sound_path}'")
-        else:
-            self.audio_ready = False
-            if not PYGAME_AVAILABLE:
-                print("[WARNING] 'pygame' not installed. Running alarm in terminal fallback mode.")
-            elif not os.path.exists(self.sound_path):
-                print(f"[WARNING] Sound file '{self.sound_path}' not found in root directory. Running in terminal mode.")
-
-    def trigger(self):
-        """Triggers alarm sound if cooldown period has passed."""
-        now = time.time()
-        if now - self.last_played_time >= self.cooldown_sec:
-            self.last_played_time = now
-            threading.Thread(target=self._play_sound, daemon=True).start()
+        # Check if MP3 file exists in root directory
+        if not os.path.exists(self.audio_file):
+            print(f"[Warning] Audio file '{self.audio_file}' not found in root directory!")
 
     def _play_sound(self):
-        if self.audio_ready:
+        """Plays alarm.mp3 asynchronously without freezing video stream."""
+        if HAS_PYGAME and os.path.exists(self.audio_file):
             try:
-                self.sound.play()
+                pygame.mixer.music.load(self.audio_file)
+                pygame.mixer.music.play()
             except Exception as e:
-                print(f"[ALARM ERROR] {e}")
+                print(f"[Audio Error] {e}")
         else:
-            print("\a[ALARM BEEP] Suspicious student behavior detected!")
+            # Fallback if pygame is not installed or file is missing
+            if sys.platform == "win32":
+                import winsound
+                winsound.Beep(1200, 400)
+            else:
+                print("\a", end="", flush=True)
+
+    def trigger(self):
+        now = time.time()
+        if now - self.last_triggered >= self.cooldown_sec:
+            self.last_triggered = now
+            # Run sound in a background daemon thread so video playback doesn't lag
+            threading.Thread(target=self._play_sound, daemon=True).start()

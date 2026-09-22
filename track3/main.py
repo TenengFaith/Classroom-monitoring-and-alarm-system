@@ -1,6 +1,4 @@
-﻿"""
-Track 3 end-to-end smoke test with video-file support.
-"""
+﻿
 
 import os
 import sys
@@ -22,13 +20,25 @@ def draw_tracked(frame, bbox_norm, student_id, score=None, alert=False):
     y1 = int(bbox_norm["y_min"] * h)
     x2 = int(bbox_norm["x_max"] * w)
     y2 = int(bbox_norm["y_max"] * h)
-    color = (0, 0, 255) if alert else (0, 255, 0)
+
+    if alert:
+        color = (0, 0, 255)
+        status = "ALERT"
+    elif score is not None and score >= 0.6:
+        color = (0, 0, 255)
+        status = "HIGH"
+    elif score is not None and score >= 0.3:
+        color = (0, 165, 255)
+        status = "WATCH"
+    else:
+        color = (0, 255, 0)
+        status = "OK"
+
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-    label = f"Student #{student_id}"
-    if score is not None:
-        label += f"  score={score:.2f}"
+
+    label = f"#{student_id}  {status}  score={score:.2f}"
     cv2.putText(frame, label, (x1, max(y1 - 8, 20)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
 
 def resolve_source(argv):
@@ -53,12 +63,14 @@ def main():
 
     pipeline = ClassroomDetectionPipeline()
     tracker = CentroidTracker(max_distance=0.15, max_missed_frames=20)
-    suspicion = StudentSuspicionTracker(threshold=0.6, required_frames=15)
+    suspicion = StudentSuspicionTracker(threshold=0.6, required_frames=3)
 
     frame_idx = 0
     processed = 0
     start = time.time()
     seen_ids = set()
+
+    last_display_score = {}
 
     try:
         while cap.isOpened():
@@ -95,8 +107,13 @@ def main():
                     torso_lean_deg=rec["torso_lean_deg"],
                     object_near_hand=rec["object_near_hand"],
                 )
+
+                if score > 0:
+                    last_display_score[student_id] = score
+                display_score = last_display_score.get(student_id, 0.0)
+
                 draw_tracked(frame, rec["bbox"], student_id,
-                             score=score, alert=should_alert)
+                             score=display_score, alert=should_alert)
 
             processed += 1
             elapsed = max(time.time() - start, 1e-6)
