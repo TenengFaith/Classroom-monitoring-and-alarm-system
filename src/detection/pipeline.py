@@ -1,22 +1,36 @@
 import cv2
 import os
-import time
 import mediapipe as mp
 from ultralytics import YOLO
 
+# Resolve absolute path to models directory relative to project root
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DEFAULT_YOLO_PATH = os.path.join(BASE_DIR, "models", "yolov8n.pt")
+DEFAULT_POSE_PATH = os.path.join(BASE_DIR, "models", "pose_landmarker_lite.task")
+DEFAULT_FACE_PATH = os.path.join(BASE_DIR, "models", "face_landmarker.task")
+
 
 class ClassroomDetectionPipeline:
+    """
+    Combined YOLOv8 + MediaPipe Pose & Face Landmarker Pipeline for classroom monitoring.
+    Detects students and cell phones in frame crops, running landmark extraction for head pose & hand proximity.
+    """
 
     def __init__(self,
-                 yolo_model_path="yolov8n.pt",
-                 pose_model_path="pose_landmarker_lite.task",
-                 face_model_path="face_landmarker.task",
+                 yolo_model_path=None,
+                 pose_model_path=None,
+                 face_model_path=None,
                  confidence_threshold=0.25,
                  crop_phone_conf=0.15,
                  crop_padding=0.05,
                  yolo_input_width=1280,
                  crop_size_px=256,
-                 landmark_every_n_frames=1):  # Run landmarks per frame for accurate hand tracking
+                 landmark_every_n_frames=1):
+        
+        self.yolo_model_path = yolo_model_path or DEFAULT_YOLO_PATH
+        self.pose_model_path = pose_model_path or DEFAULT_POSE_PATH
+        self.face_model_path = face_model_path or DEFAULT_FACE_PATH
+
         self.confidence_threshold = confidence_threshold
         self.crop_phone_conf = crop_phone_conf
         self.crop_padding = crop_padding
@@ -24,7 +38,8 @@ class ClassroomDetectionPipeline:
         self.crop_size_px = crop_size_px
         self.landmark_every_n_frames = landmark_every_n_frames
 
-        self.yolo = YOLO(yolo_model_path)
+        # Load YOLO model
+        self.yolo = YOLO(self.yolo_model_path)
 
         BaseOptions = mp.tasks.BaseOptions
         PoseLandmarker = mp.tasks.vision.PoseLandmarker
@@ -34,7 +49,7 @@ class ClassroomDetectionPipeline:
         RunningMode = mp.tasks.vision.RunningMode
 
         pose_options = PoseLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=pose_model_path),
+            base_options=BaseOptions(model_asset_path=self.pose_model_path),
             running_mode=RunningMode.VIDEO,
             num_poses=1,
             min_pose_detection_confidence=0.5,
@@ -44,7 +59,7 @@ class ClassroomDetectionPipeline:
         self.pose_detector = PoseLandmarker.create_from_options(pose_options)
 
         face_options = FaceLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=face_model_path),
+            base_options=BaseOptions(model_asset_path=self.face_model_path),
             running_mode=RunningMode.VIDEO,
             num_faces=1,
             output_face_blendshapes=False,
@@ -68,21 +83,11 @@ class ClassroomDetectionPipeline:
         return frame[cy1:cy2, cx1:cx2], (cx1, cy1)
 
     def _is_phone_held_by_hand(self, phone_px_box, pose_landmarks, crop_w, crop_h):
-        """
-        Verifies if the phone bounding box is held in a hand by checking proximity
-        to MediaPipe hand keypoints: Wrists (15, 16), Pinkies (17, 18), 
-        Index fingers (19, 20), and Thumbs (21, 22).
-        """
         if not pose_landmarks or len(pose_landmarks) < 23:
-            # If hand landmarks are unobserved, retain detection if inside upper crop
             return True
 
         px1, py1, px2, py2 = phone_px_box
-
-        # Indices corresponding to wrists and hand keypoints in MediaPipe Pose
         hand_indices = [15, 16, 17, 18, 19, 20, 21, 22]
-
-        # Tolerance margin (in pixels) around phone box to account for hand grasp
         margin = 25.0
 
         for idx in hand_indices:
@@ -93,7 +98,6 @@ class ClassroomDetectionPipeline:
             hx = lm["x"] * crop_w
             hy = lm["y"] * crop_h
 
-            # Check if hand landmark falls inside or near the phone bounding box
             if (px1 - margin) <= hx <= (px2 + margin) and (py1 - margin) <= hy <= (py2 + margin):
                 return True
 
@@ -111,11 +115,9 @@ class ClassroomDetectionPipeline:
             conf = float(box.conf[0])
             px1, py1, px2, py2 = box.xyxy[0].tolist()
 
-            # Verify that the detected phone is held in hand
             if not self._is_phone_held_by_hand((px1, py1, px2, py2), pose_landmarks, crop_w, crop_h):
                 continue
 
-            # Convert crop coordinates back to global frame
             gx1 = cx1 + px1
             gy1 = cy1 + py1
             gx2 = cx1 + px2
@@ -135,9 +137,7 @@ class ClassroomDetectionPipeline:
         h, w = crop.shape[:2]
         if w > self.crop_size_px:
             scale = self.crop_size_px / w
-            crop = cv2.resize(crop,
-                              (self.crop_size_px, int(h * scale)),
-                              interpolation=cv2.INTER_AREA)
+            crop = cv2.resize(crop, (self.crop_size_px, int(h * scale)), interpolation=cv2.INTER_AREA)
 
         rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
@@ -182,9 +182,7 @@ class ClassroomDetectionPipeline:
         else:
             yolo_input = frame_bgr
 
-        results = self.yolo(yolo_input, conf=self.confidence_threshold,
-                            classes=[0, 67], verbose=False)[0]
-
+        results = self.yolo(yolo_input, conf=self.confidence_threshold, classes=[0, 67], verbose=False)[0]
         yolo_h, yolo_w = yolo_input.shape[:2]
 
         structured = {
@@ -216,8 +214,7 @@ class ClassroomDetectionPipeline:
             }
 
             if cls_id == 0:
-                crop, (cx1, cy1) = self._crop_with_padding(
-                    frame_bgr, int(x1), int(y1), int(x2), int(y2))
+                crop, (cx1, cy1) = self._crop_with_padding(frame_bgr, int(x1), int(y1), int(x2), int(y2))
                 if crop is None or crop.size == 0:
                     continue
 
@@ -229,7 +226,6 @@ class ClassroomDetectionPipeline:
                 else:
                     pose_lm, face_lm = [], []
 
-                # Scan crop for phone and verify hand association
                 crop_phones = self._detect_phone_in_crop(crop, cx1, cy1, w_full, h_full, pose_lm)
                 for phone_bbox in crop_phones:
                     structured["objects"].append({
@@ -260,71 +256,7 @@ class ClassroomDetectionPipeline:
         return structured
 
     def close(self):
-        self.pose_detector.close()
-        self.face_detector.close()
-
-
-if __name__ == "__main__":
-    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    VIDEO_PATH = os.path.join(SCRIPT_DIR, "test_video/sample-video.mp4")
-    YOLO_PATH = os.path.join(SCRIPT_DIR, "yolov8n.pt")
-    POSE_PATH = os.path.join(SCRIPT_DIR, "pose_landmarker_lite.task")
-    FACE_PATH = os.path.join(SCRIPT_DIR, "face_landmarker.task")
-
-    cap = cv2.VideoCapture(VIDEO_PATH)
-    if not cap.isOpened():
-        print(f"Could not open {VIDEO_PATH}")
-        exit()
-
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    frame_duration_ms = int(1000 / fps)
-
-    pipeline = ClassroomDetectionPipeline(
-        yolo_model_path=YOLO_PATH,
-        pose_model_path=POSE_PATH,
-        face_model_path=FACE_PATH,
-    )
-
-    frame_counter = 0
-    t0 = time.time()
-    try:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            ts = int(frame_counter * frame_duration_ms)
-            frame_counter += 1
-
-            det = pipeline.process_frame(frame, ts)
-
-            fh, fw = frame.shape[:2]
-
-            # Draw Person Bounding Boxes (Green)
-            for person in det["poses"]:
-                b = person["bbox"]
-                x1 = int(b["x_min"] * fw)
-                y1 = int(b["y_min"] * fh)
-                x2 = int(b["x_max"] * fw)
-                y2 = int(b["y_max"] * fh)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-            # Draw Phones Held in Hand (Purple)
-            for obj in det["objects"]:
-                b = obj["bbox"]
-                x1 = int(b["x_min"] * fw)
-                y1 = int(b["y_min"] * fh)
-                x2 = int(b["x_max"] * fw)
-                y2 = int(b["y_max"] * fh)
-
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 255), 2)
-                cv2.putText(frame, f"Phone {b['confidence']:.2f}",
-                            (x1, max(y1 - 10, 15)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
-
-            cv2.imshow("Classroom Detection", frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
-    finally:
-        cap.release()
-        pipeline.close()
-        cv2.destroyAllWindows()
+        if hasattr(self, 'pose_detector') and self.pose_detector:
+            self.pose_detector.close()
+        if hasattr(self, 'face_detector') and self.face_detector:
+            self.face_detector.close()

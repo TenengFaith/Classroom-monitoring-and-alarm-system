@@ -5,21 +5,19 @@ from datetime import datetime
 
 class IncidentLogger:
     """
-    Logs flagged suspicious incidents to CSV with debouncing per student.
+    Logs flagged suspicious incidents to CSV with student-level debouncing.
     """
     def __init__(self, csv_filepath="classroom_alerts.csv", debounce_sec=5.0):
         self.csv_filepath = csv_filepath
         self.debounce_sec = debounce_sec
-        self.last_logged = {}  # student_id -> timestamp
+        self.last_logged = {}
 
-        # Create file with headers if it doesn't exist
         if not os.path.exists(self.csv_filepath):
             with open(self.csv_filepath, mode="w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow(["timestamp", "student_id", "suspicion_score", "head_yaw_deg", "torso_lean_deg", "object_near_hand"])
 
     def log_incident(self, student_id, score, head_yaw, torso_lean, object_near):
-        """Logs incident if debounce window has passed for this student_id."""
         now = datetime.now()
         now_ts = now.timestamp()
 

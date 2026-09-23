@@ -1,75 +1,116 @@
+#!/usr/bin/env python3
+"""
+Classroom Monitoring & Alarm System
+Main entry point for real-time cheating and suspicious behavior detection.
+"""
+
 import os
 import sys
 import time
+import argparse
 import cv2
 
+# Add project root to path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-# Track 2 Detection Pipeline
-from detection_model import ClassroomDetectionPipeline
+from src.capture import VideoStream
+from src.detection import ClassroomDetectionPipeline
+from src.tracking import adapt, CentroidTracker, StudentSuspicionTracker
+from src.alert import Alarm, IncidentLogger
+from src.ui import draw_flag_overlay, apply_spotlight, draw_dashboard
 
-# Track 3 Tracking & Suspicion Modules
-from track3.adapter import adapt
-from track3.trackers.centroid_tracker import CentroidTracker
-from track3.trackers.suspicion_tracker import StudentSuspicionTracker
 
-# Track 4 System Components
-from alarm import Alarm
-from incident_logger import IncidentLogger
-from overlay import draw_flag_overlay, apply_spotlight, draw_dashboard
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Smart Classroom Monitoring & Cheating Detection System"
+    )
+    parser.add_argument(
+        "--source", type=str, default="test_video/sample-video.mp4",
+        help="Input video source: file path, camera index (e.g. 0), or IP URL."
+    )
+    parser.add_argument(
+        "--yolo-model", type=str, default=os.path.join(PROJECT_ROOT, "models", "yolov8n.pt"),
+        help="Path to YOLOv8 model file."
+    )
+    parser.add_argument(
+        "--pose-model", type=str, default=os.path.join(PROJECT_ROOT, "models", "pose_landmarker_lite.task"),
+        help="Path to MediaPipe Pose Landmarker task file."
+    )
+    parser.add_argument(
+        "--face-model", type=str, default=os.path.join(PROJECT_ROOT, "models", "face_landmarker.task"),
+        help="Path to MediaPipe Face Landmarker task file."
+    )
+    parser.add_argument(
+        "--alarm-sound", type=str, default=os.path.join(PROJECT_ROOT, "assets", "alarm.mp3"),
+        help="Path to alarm MP3 sound file."
+    )
+    parser.add_argument(
+        "--output-csv", type=str, default="classroom_alerts.csv",
+        help="Path to output CSV alert log file."
+    )
+    parser.add_argument(
+        "--no-alarm", action="store_true",
+        help="Disable audio alarm playback."
+    )
+    parser.add_argument(
+        "--no-display", action="store_true",
+        help="Run without displaying OpenCV window (headless mode)."
+    )
+    return parser.parse_args()
 
 
 def main():
-    video_path = sys.argv[1] if len(sys.argv) > 1 else "sample-video.mp4"
-    if not os.path.exists(video_path):
-        # Fallback search in test_video directory
-        video_path = os.path.join("test_video", os.path.basename(video_path))
+    args = parse_args()
 
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        print(f"[ERROR] Could not open video source: {video_path}")
-        return
+    # 1. Resolve video source fallback
+    video_source = args.source
+    if not video_source.isdigit() and not video_source.startswith("http") and not os.path.exists(video_source):
+        fallback = os.path.join(PROJECT_ROOT, "test_video", os.path.basename(video_source))
+        if os.path.exists(fallback):
+            video_source = fallback
 
-    fps_input = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    frame_duration_ms = int(1000 / fps_input)
+    print(f"[SYSTEM] Initializing stream source: {video_source}")
+    stream = VideoStream(source=video_source)
 
-    # Initialize Track 2 Pipeline
+    # 2. Initialize Detection Pipeline
     pipeline = ClassroomDetectionPipeline(
-        yolo_model_path="yolov8n.pt",
-        pose_model_path="pose_landmarker_lite.task",
-        face_model_path="face_landmarker.task"
+        yolo_model_path=args.yolo_model,
+        pose_model_path=args.pose_model,
+        face_model_path=args.face_model
     )
 
-    # Initialize Track 3 Trackers
+    # 3. Initialize Tracking Components
     centroid_tracker = CentroidTracker(max_distance=0.15, max_missed_frames=20)
     suspicion_tracker = StudentSuspicionTracker(threshold=0.6, required_frames=10)
 
-    # Initialize Track 4 Alarm & Logger
-    alarm = Alarm(sound_path="alarm.mp3", cooldown_sec=2.0)
-    logger = IncidentLogger(csv_filepath="classroom_alerts.csv", debounce_sec=5.0)
+    # 4. Initialize Alerting & Logging
+    alarm = Alarm(sound_path=args.alarm_sound, cooldown_sec=2.0) if not args.no_alarm else None
+    logger = IncidentLogger(csv_filepath=args.output_csv, debounce_sec=5.0)
 
     total_frames = 0
-    t0 = time.time()
-    fps = 0.0
+    start_time = time.time()
+    declared_fps = stream.get_declared_fps()
+    frame_duration_ms = int(1000 / declared_fps)
+
+    print("[SYSTEM] Classroom Monitoring Pipeline Active. Press 'q' in video window to exit.\n")
 
     try:
-        while cap.isOpened():
-            ret, frame = cap.read()
+        while True:
+            ret, frame = stream.read()
             if not ret or frame is None:
-                print("\n[INFO] End of video stream.")
+                print("\n[INFO] End of stream or stream disconnected.")
                 break
 
             total_frames += 1
             timestamp_ms = int(total_frames * frame_duration_ms)
-
             h_full, w_full = frame.shape[:2]
 
-            # 1. Run Track 2 Detection
+            # Step 1: Detect persons & objects via YOLOv8 + MediaPipe
             raw_detections = pipeline.process_frame(frame, timestamp_ms)
 
-            # 2. Run Track 3 Adapter & Centroid Matching
+            # Step 2: Convert to normalized records & update centroid tracking
             records = adapt(raw_detections, full_w=w_full, full_h=h_full)
             centroids = [r["centroid"] for r in records if "centroid" in r]
             assignments = centroid_tracker.update(centroids)
@@ -77,7 +118,7 @@ def main():
             flagged_bboxes = []
             has_alarm_this_frame = False
 
-            # 3. Update Suspicion & Track 4 System per Student
+            # Step 3: Evaluate student behavior & update suspicion scores
             for det_idx, student_id in assignments.items():
                 if det_idx >= len(records):
                     continue
@@ -116,14 +157,14 @@ def main():
                     has_alarm_this_frame = True
                     flagged_bboxes.append(pixel_bbox)
 
-                    # Trigger Track 4 Sound Alarm & CSV Logging
-                    alarm.trigger()
+                    if alarm:
+                        alarm.trigger()
                     logger.log_incident(student_id, score, yaw, lean, obj_near)
 
                 draw_flag_overlay(frame, pixel_bbox, student_id, score, is_flagged=should_alert)
 
-            # 4. Calculate FPS and render overlays
-            elapsed = time.time() - t0
+            # Step 4: Render UI dashboard & spotlight
+            elapsed = time.time() - start_time
             fps = total_frames / max(elapsed, 1e-6)
 
             if flagged_bboxes:
@@ -131,15 +172,19 @@ def main():
 
             draw_dashboard(frame, fps, len(assignments), has_alarm_this_frame)
 
-            cv2.imshow("Smart Classroom Monitoring System", frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+            if not args.no_display:
+                cv2.imshow("Classroom Monitoring System", frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
 
     finally:
-        cap.release()
+        stream.release()
         pipeline.close()
-        cv2.destroyAllWindows()
-        print(f"\nFinal Summary: Processed {total_frames} frames in {time.time()-t0:.1f}s ({fps:.1f} FPS)")
+        if not args.no_display:
+            cv2.destroyAllWindows()
+
+        elapsed_total = time.time() - start_time
+        print(f"\n[SUMMARY] Processed {total_frames} frames in {elapsed_total:.1f}s ({total_frames / max(elapsed_total, 1e-6):.1f} FPS)")
 
 
 if __name__ == "__main__":

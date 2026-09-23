@@ -1,8 +1,7 @@
-pose_landmarker_full.task
 venv/
 __pycache__/
 *.pyc
-*.task
 test_videos/
 .env
 .DS_Store
+classroom_alerts.csv

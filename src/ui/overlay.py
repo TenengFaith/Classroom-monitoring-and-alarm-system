@@ -5,7 +5,7 @@ import numpy as np
 def draw_flag_overlay(frame, bbox, student_id, score, is_flagged):
     """Draws bounding box and metadata label above student."""
     x1, y1, x2, y2 = bbox
-    color = (0, 0, 255) if is_flagged else (0, 255, 0)  # Red if FLAGGED, Green if NORMAL
+    color = (0, 0, 255) if is_flagged else (0, 255, 0)
     thickness = 3 if is_flagged else 2
 
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
@@ -13,7 +13,6 @@ def draw_flag_overlay(frame, bbox, student_id, score, is_flagged):
     status_str = "FLAGGED" if is_flagged else "NORMAL"
     label = f"ID #{student_id} | {status_str} ({score:.2f})"
 
-    # Floating background label box
     label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
     lbl_w, lbl_h = label_size
     lbl_y1 = max(0, y1 - lbl_h - 10)
