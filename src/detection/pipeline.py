@@ -3,7 +3,6 @@ import os
 import mediapipe as mp
 from ultralytics import YOLO
 
-# Resolve absolute path to models directory relative to project root
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_YOLO_PATH = os.path.join(BASE_DIR, "models", "yolov8n.pt")
 DEFAULT_POSE_PATH = os.path.join(BASE_DIR, "models", "pose_landmarker_lite.task")
@@ -21,12 +20,12 @@ class ClassroomDetectionPipeline:
                  pose_model_path=None,
                  face_model_path=None,
                  confidence_threshold=0.25,
-                 crop_phone_conf=0.15,
+                 crop_phone_conf=0.35,  # Filter out static desk objects (calculators, IDs, pens)
                  crop_padding=0.05,
                  yolo_input_width=1280,
                  crop_size_px=256,
                  landmark_every_n_frames=1):
-        
+
         self.yolo_model_path = yolo_model_path or DEFAULT_YOLO_PATH
         self.pose_model_path = pose_model_path or DEFAULT_POSE_PATH
         self.face_model_path = face_model_path or DEFAULT_FACE_PATH
@@ -38,7 +37,6 @@ class ClassroomDetectionPipeline:
         self.crop_size_px = crop_size_px
         self.landmark_every_n_frames = landmark_every_n_frames
 
-        # Load YOLO model
         self.yolo = YOLO(self.yolo_model_path)
 
         BaseOptions = mp.tasks.BaseOptions
@@ -84,11 +82,11 @@ class ClassroomDetectionPipeline:
 
     def _is_phone_held_by_hand(self, phone_px_box, pose_landmarks, crop_w, crop_h):
         if not pose_landmarks or len(pose_landmarks) < 23:
-            return True
+            return False
 
         px1, py1, px2, py2 = phone_px_box
         hand_indices = [15, 16, 17, 18, 19, 20, 21, 22]
-        margin = 25.0
+        margin = 20.0
 
         for idx in hand_indices:
             lm = pose_landmarks[idx]

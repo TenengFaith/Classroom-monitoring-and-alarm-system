@@ -6,6 +6,10 @@ LEFT_EAR       = 7
 RIGHT_EAR      = 8
 LEFT_SHOULDER  = 11
 RIGHT_SHOULDER = 12
+LEFT_ELBOW     = 13
+RIGHT_ELBOW    = 14
+LEFT_WRIST     = 15
+RIGHT_WRIST    = 16
 LEFT_HIP       = 23
 RIGHT_HIP      = 24
 
@@ -17,8 +21,6 @@ UPPER_LIP      = 13
 LOWER_LIP      = 14
 LEFT_CHEEK     = 234
 RIGHT_CHEEK    = 454
-LEFT_EYE       = 33
-RIGHT_EYE      = 263
 
 
 def _crop_lm_to_global(lm, crop_offset, crop_size, full_w, full_h):
@@ -61,30 +63,48 @@ def _bbox_center(bbox):
     return None
 
 
-def _torso_lean_deg(landmarks):
-    if len(landmarks) < 25:
-        return None
+def _shoulder_tilt_and_lean(landmarks):
+    """
+    Calculates sideways torso lean / shoulder line tilt angle in degrees.
+    Detects when a student leans sideways completely away from their desk towards a peer.
+    """
+    if not landmarks or len(landmarks) < 13:
+        return 0.0
+
     ls = landmarks[LEFT_SHOULDER]
     rs = landmarks[RIGHT_SHOULDER]
-    lh = landmarks[LEFT_HIP]
-    rh = landmarks[RIGHT_HIP]
 
-    vis_min = min(ls.get("visibility", 1.0), rs.get("visibility", 1.0),
-                  lh.get("visibility", 1.0), rh.get("visibility", 1.0))
+    vis_min = min(ls.get("visibility", 1.0), rs.get("visibility", 1.0))
     if vis_min < 0.3:
-        return None
+        return 0.0
 
-    sx = (ls["x"] + rs["x"]) / 2.0
-    sy = (ls["y"] + rs["y"]) / 2.0
-    hx = (lh["x"] + rh["x"]) / 2.0
-    hy = (lh["y"] + rh["y"]) / 2.0
+    dx = ls["x"] - rs["x"]
+    dy = ls["y"] - rs["y"]
 
-    return math.degrees(math.atan2(sx - hx, -(sy - hy)))
+    if abs(dx) < 1e-4:
+        return 90.0
+
+    # Shoulder tilt angle from horizontal line
+    tilt_deg = math.degrees(math.atan2(abs(dy), abs(dx)))
+
+    # Also check if hip landmarks are available for spine vector lean
+    if len(landmarks) >= 25:
+        lh = landmarks[LEFT_HIP]
+        rh = landmarks[RIGHT_HIP]
+        if min(lh.get("visibility", 1.0), rh.get("visibility", 1.0)) >= 0.3:
+            sx = (ls["x"] + rs["x"]) / 2.0
+            sy = (ls["y"] + rs["y"]) / 2.0
+            hx = (lh["x"] + rh["x"]) / 2.0
+            hy = (lh["y"] + rh["y"]) / 2.0
+            spine_lean = math.degrees(math.atan2(abs(sx - hx), max(1e-4, abs(sy - hy))))
+            return max(tilt_deg, spine_lean)
+
+    return tilt_deg
 
 
 def _head_yaw_deg_from_face(face_landmarks):
     if not face_landmarks or len(face_landmarks) < 455:
-        return None
+        return 0.0
     nose = face_landmarks[NOSE_TIP]
     lc = face_landmarks[LEFT_CHEEK]
     rc = face_landmarks[RIGHT_CHEEK]
@@ -92,7 +112,7 @@ def _head_yaw_deg_from_face(face_landmarks):
     face_mid_x = (lc["x"] + rc["x"]) / 2.0
     face_width = abs(rc["x"] - lc["x"])
     if face_width < 1e-4:
-        return None
+        return 0.0
 
     offset = (nose["x"] - face_mid_x) / (face_width / 2.0)
     offset = max(-1.0, min(1.0, offset))
@@ -103,7 +123,7 @@ def _head_pitch_deg(face_landmarks, pose_landmarks):
     """
     Estimates head pitch angle in degrees (downward tilt).
     When student looks down into their lap / under desk:
-    - Pitch angle is positive (> 25-35 deg).
+    - Pitch angle is positive (> 20-30 deg).
     """
     if face_landmarks and len(face_landmarks) > 152:
         forehead = face_landmarks[FOREHEAD]
@@ -112,19 +132,11 @@ def _head_pitch_deg(face_landmarks, pose_landmarks):
 
         face_h = abs(chin["y"] - forehead["y"])
         if face_h > 1e-4:
-            # Measure relative position of nose tip between forehead and chin
             forehead_to_nose = nose["y"] - forehead["y"]
-            nose_to_chin = chin["y"] - nose["y"]
-
-            # In normal upright face, forehead_to_nose is ~40-45% of face height.
-            # When looking down at lap / under desk, nose drops relative to forehead
-            # and forehead_to_nose increases significantly.
             ratio = forehead_to_nose / face_h
-            # Pitch estimation mapping: ratio 0.40 -> 0 deg, 0.70 -> 50 deg
             pitch_deg = max(0.0, (ratio - 0.42) * 160.0)
             return pitch_deg
 
-    # Fallback to pose landmarks if face Mesh not available
     if pose_landmarks and len(pose_landmarks) > 8:
         nose = pose_landmarks[NOSE]
         lear = pose_landmarks[LEFT_EAR]
@@ -134,17 +146,13 @@ def _head_pitch_deg(face_landmarks, pose_landmarks):
         ear_vis = min(lear.get("visibility", 1.0), rear.get("visibility", 1.0))
         if ear_vis >= 0.3:
             diff_y = nose["y"] - ear_y
-            if diff_y > 0.05:  # Nose significantly below ears indicates head bent down
+            if diff_y > 0.04:
                 return diff_y * 300.0
 
     return 0.0
 
 
 def _mouth_openness_ratio(face_landmarks):
-    """
-    Estimates Mouth Openness Ratio (MAR) for detecting talking / communicating.
-    MAR > 0.15 indicates open mouth / speaking.
-    """
     if not face_landmarks or len(face_landmarks) < 153:
         return 0.0
 
@@ -161,12 +169,39 @@ def _mouth_openness_ratio(face_landmarks):
     return lip_dist / face_h
 
 
+def _is_hands_under_desk(pose_landmarks):
+    """
+    Detects if student's hands/wrists are positioned in their lap area / below desk height.
+    In crop coordinates (0..1 top to bottom), desk surface is at ~0.55-0.65.
+    When hands are in lap under desk, wrist landmark y > 0.60 or wrists are below elbows.
+    """
+    if not pose_landmarks or len(pose_landmarks) < 17:
+        return False
+
+    lw = pose_landmarks[LEFT_WRIST]
+    rw = pose_landmarks[RIGHT_WRIST]
+
+    lw_vis = lw.get("visibility", 1.0)
+    rw_vis = rw.get("visibility", 1.0)
+
+    # Check if left or right wrist is in crop lower half (lap region below desk)
+    left_under = (lw_vis >= 0.3 and lw["y"] > 0.62)
+    right_under = (rw_vis >= 0.3 and rw["y"] > 0.62)
+
+    # Also check if wrist is significantly lower than elbow (hanging down into lap)
+    if len(pose_landmarks) >= 15:
+        le = pose_landmarks[LEFT_ELBOW]
+        re = pose_landmarks[RIGHT_ELBOW]
+
+        if lw_vis >= 0.3 and le.get("visibility", 1.0) >= 0.3 and (lw["y"] - le["y"]) > 0.12:
+            left_under = True
+        if rw_vis >= 0.3 and re.get("visibility", 1.0) >= 0.3 and (rw["y"] - re["y"]) > 0.12:
+            right_under = True
+
+    return left_under or right_under
+
+
 def adapt(structured_output, full_w=1280, full_h=720):
-    """
-    Converts detection pipeline structured output into tracking person records.
-    Computes pitch (looking under desk), yaw (turning), mouth openness (talking),
-    torso lean, and hand proximity.
-    """
     poses = structured_output.get("poses", [])
     objects = structured_output.get("objects", [])
     records = []
@@ -201,7 +236,8 @@ def adapt(structured_output, full_w=1280, full_h=720):
         head_yaw = _head_yaw_deg_from_face(global_face_lm) if global_face_lm else 0.0
         head_pitch = _head_pitch_deg(global_face_lm, global_pose_lm)
         mouth_ratio = _mouth_openness_ratio(global_face_lm) if global_face_lm else 0.0
-        torso_lean = _torso_lean_deg(global_pose_lm) if global_pose_lm else 0.0
+        torso_lean = _shoulder_tilt_and_lean(raw_pose_lm) if raw_pose_lm else 0.0
+        hands_under = _is_hands_under_desk(raw_pose_lm) if raw_pose_lm else False
 
         records.append({
             "centroid": centroid,
@@ -209,6 +245,7 @@ def adapt(structured_output, full_w=1280, full_h=720):
             "head_pitch_deg": head_pitch,
             "mouth_open_ratio": mouth_ratio,
             "torso_lean_deg": torso_lean,
+            "hands_under_desk": hands_under,
             "object_near_hand": has_detected_phone,
             "pose_id": pose.get("pose_id"),
             "bbox": bbox,

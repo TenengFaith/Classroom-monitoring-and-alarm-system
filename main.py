@@ -80,7 +80,7 @@ def main():
     )
 
     centroid_tracker = CentroidTracker(max_distance=0.15, max_missed_frames=20)
-    suspicion_tracker = StudentSuspicionTracker(threshold=0.55, required_frames=8)
+    suspicion_tracker = StudentSuspicionTracker(threshold=0.50, required_frames=6)
     logger = IncidentLogger(
         csv_filepath=args.output_csv,
         output_dir=args.snapshot_dir,
@@ -126,6 +126,7 @@ def main():
                 yaw = rec.get("head_yaw_deg", 0.0)
                 mouth = rec.get("mouth_open_ratio", 0.0)
                 lean = rec.get("torso_lean_deg", 0.0)
+                hands_under = rec.get("hands_under_desk", False)
                 obj_near = rec.get("object_near_hand", False)
 
                 score, should_alert, cheat_reason = suspicion_tracker.update(
@@ -134,6 +135,7 @@ def main():
                     head_yaw_deg=yaw,
                     mouth_open_ratio=mouth,
                     torso_lean_deg=lean,
+                    hands_under_desk=hands_under,
                     object_near_hand=obj_near
                 )
 
