@@ -1,22 +1,28 @@
 import math
 
 # MediaPipe Pose landmark indices
+NOSE           = 0
+LEFT_EAR       = 7
+RIGHT_EAR      = 8
 LEFT_SHOULDER  = 11
 RIGHT_SHOULDER = 12
 LEFT_HIP       = 23
 RIGHT_HIP      = 24
 
 # MediaPipe Face Landmarker indices
-NOSE_TIP    = 1
-LEFT_CHEEK  = 234
-RIGHT_CHEEK = 454
+NOSE_TIP       = 1
+FOREHEAD       = 10
+CHIN           = 152
+UPPER_LIP      = 13
+LOWER_LIP      = 14
+LEFT_CHEEK     = 234
+RIGHT_CHEEK    = 454
+LEFT_EYE       = 33
+RIGHT_EYE      = 263
 
 
 def _crop_lm_to_global(lm, crop_offset, crop_size, full_w, full_h):
-    """
-    Transforms landmarks from crop-local coordinates (0..1 within crop)
-    to full-frame normalized coordinates (0..1 within full frame).
-    """
+    """Transforms landmarks from crop-local coordinates to full-frame normalized coordinates."""
     cx, cy = crop_offset
     cw, ch = crop_size
 
@@ -93,35 +99,73 @@ def _head_yaw_deg_from_face(face_landmarks):
     return offset * 70.0
 
 
-def extract_head_yaw(pose_landmarks, face_landmarks):
-    if face_landmarks and len(face_landmarks) > 0:
-        nose = face_landmarks[1]
-        left_cheek = face_landmarks[234]
-        right_cheek = face_landmarks[454]
-        mid_x = (left_cheek["x"] + right_cheek["x"]) / 2 if isinstance(left_cheek, dict) else (left_cheek.x + right_cheek.x) / 2
-        lc_x = left_cheek["x"] if isinstance(left_cheek, dict) else left_cheek.x
-        rc_x = right_cheek["x"] if isinstance(right_cheek, dict) else right_cheek.x
-        n_x = nose["x"] if isinstance(nose, dict) else nose.x
-        width = abs(rc_x - lc_x)
-        if width > 0:
-            return abs(n_x - mid_x) / width
+def _head_pitch_deg(face_landmarks, pose_landmarks):
+    """
+    Estimates head pitch angle in degrees (downward tilt).
+    When student looks down into their lap / under desk:
+    - Pitch angle is positive (> 25-35 deg).
+    """
+    if face_landmarks and len(face_landmarks) > 152:
+        forehead = face_landmarks[FOREHEAD]
+        nose = face_landmarks[NOSE_TIP]
+        chin = face_landmarks[CHIN]
 
-    if pose_landmarks and len(pose_landmarks) > 0:
-        left_ear = pose_landmarks[7]
-        right_ear = pose_landmarks[8]
-        le_vis = left_ear.get("visibility", 1.0) if isinstance(left_ear, dict) else getattr(left_ear, "visibility", 1.0)
-        re_vis = right_ear.get("visibility", 1.0) if isinstance(right_ear, dict) else getattr(right_ear, "visibility", 1.0)
+        face_h = abs(chin["y"] - forehead["y"])
+        if face_h > 1e-4:
+            # Measure relative position of nose tip between forehead and chin
+            forehead_to_nose = nose["y"] - forehead["y"]
+            nose_to_chin = chin["y"] - nose["y"]
 
-        if le_vis < 0.3 or re_vis < 0.3:
-            return 0.75
+            # In normal upright face, forehead_to_nose is ~40-45% of face height.
+            # When looking down at lap / under desk, nose drops relative to forehead
+            # and forehead_to_nose increases significantly.
+            ratio = forehead_to_nose / face_h
+            # Pitch estimation mapping: ratio 0.40 -> 0 deg, 0.70 -> 50 deg
+            pitch_deg = max(0.0, (ratio - 0.42) * 160.0)
+            return pitch_deg
+
+    # Fallback to pose landmarks if face Mesh not available
+    if pose_landmarks and len(pose_landmarks) > 8:
+        nose = pose_landmarks[NOSE]
+        lear = pose_landmarks[LEFT_EAR]
+        rear = pose_landmarks[RIGHT_EAR]
+
+        ear_y = (lear["y"] + rear["y"]) / 2.0
+        ear_vis = min(lear.get("visibility", 1.0), rear.get("visibility", 1.0))
+        if ear_vis >= 0.3:
+            diff_y = nose["y"] - ear_y
+            if diff_y > 0.05:  # Nose significantly below ears indicates head bent down
+                return diff_y * 300.0
 
     return 0.0
+
+
+def _mouth_openness_ratio(face_landmarks):
+    """
+    Estimates Mouth Openness Ratio (MAR) for detecting talking / communicating.
+    MAR > 0.15 indicates open mouth / speaking.
+    """
+    if not face_landmarks or len(face_landmarks) < 153:
+        return 0.0
+
+    upper_lip = face_landmarks[UPPER_LIP]
+    lower_lip = face_landmarks[LOWER_LIP]
+    forehead = face_landmarks[FOREHEAD]
+    chin = face_landmarks[CHIN]
+
+    face_h = abs(chin["y"] - forehead["y"])
+    if face_h < 1e-4:
+        return 0.0
+
+    lip_dist = abs(lower_lip["y"] - upper_lip["y"])
+    return lip_dist / face_h
 
 
 def adapt(structured_output, full_w=1280, full_h=720):
     """
     Converts detection pipeline structured output into tracking person records.
-    Maps cropped landmarks back into full-frame normalized coordinates.
+    Computes pitch (looking under desk), yaw (turning), mouth openness (talking),
+    torso lean, and hand proximity.
     """
     poses = structured_output.get("poses", [])
     objects = structured_output.get("objects", [])
@@ -154,12 +198,16 @@ def adapt(structured_output, full_w=1280, full_h=720):
         if centroid is None:
             continue
 
-        head_yaw = _head_yaw_deg_from_face(global_face_lm) if global_face_lm else None
-        torso_lean = _torso_lean_deg(global_pose_lm) if global_pose_lm else None
+        head_yaw = _head_yaw_deg_from_face(global_face_lm) if global_face_lm else 0.0
+        head_pitch = _head_pitch_deg(global_face_lm, global_pose_lm)
+        mouth_ratio = _mouth_openness_ratio(global_face_lm) if global_face_lm else 0.0
+        torso_lean = _torso_lean_deg(global_pose_lm) if global_pose_lm else 0.0
 
         records.append({
             "centroid": centroid,
             "head_yaw_deg": head_yaw,
+            "head_pitch_deg": head_pitch,
+            "mouth_open_ratio": mouth_ratio,
             "torso_lean_deg": torso_lean,
             "object_near_hand": has_detected_phone,
             "pose_id": pose.get("pose_id"),

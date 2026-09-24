@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Classroom Monitoring & Alarm System
-Main entry point for real-time cheating and suspicious behavior detection.
+Smart Exam Hall Cheating Detection System
+Main entry point for real-time exam monitoring, behavior analysis, and incident logging.
 """
 
 import os
@@ -10,7 +10,7 @@ import time
 import argparse
 import cv2
 
-# Add project root to path
+# Add project root to sys.path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -18,13 +18,13 @@ if PROJECT_ROOT not in sys.path:
 from src.capture import VideoStream
 from src.detection import ClassroomDetectionPipeline
 from src.tracking import adapt, CentroidTracker, StudentSuspicionTracker
-from src.alert import Alarm, IncidentLogger
+from src.logging import IncidentLogger
 from src.ui import draw_flag_overlay, apply_spotlight, draw_dashboard
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Smart Classroom Monitoring & Cheating Detection System"
+        description="Smart Exam Hall Cheating Detection System"
     )
     parser.add_argument(
         "--source", type=str, default="test_video/sample-video.mp4",
@@ -43,16 +43,16 @@ def parse_args():
         help="Path to MediaPipe Face Landmarker task file."
     )
     parser.add_argument(
-        "--alarm-sound", type=str, default=os.path.join(PROJECT_ROOT, "assets", "alarm.mp3"),
-        help="Path to alarm MP3 sound file."
-    )
-    parser.add_argument(
         "--output-csv", type=str, default="classroom_alerts.csv",
         help="Path to output CSV alert log file."
     )
     parser.add_argument(
-        "--no-alarm", action="store_true",
-        help="Disable audio alarm playback."
+        "--snapshot-dir", type=str, default="flagged_incidents",
+        help="Directory to save annotated frame snapshots when cheating is flagged."
+    )
+    parser.add_argument(
+        "--cooldown-sec", type=float, default=5.0,
+        help="Pause duration in seconds for student tracking alerts after flagging an incident."
     )
     parser.add_argument(
         "--no-display", action="store_true",
@@ -64,7 +64,6 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # 1. Resolve video source fallback
     video_source = args.source
     if not video_source.isdigit() and not video_source.startswith("http") and not os.path.exists(video_source):
         fallback = os.path.join(PROJECT_ROOT, "test_video", os.path.basename(video_source))
@@ -74,68 +73,70 @@ def main():
     print(f"[SYSTEM] Initializing stream source: {video_source}")
     stream = VideoStream(source=video_source)
 
-    # 2. Initialize Detection Pipeline
     pipeline = ClassroomDetectionPipeline(
         yolo_model_path=args.yolo_model,
         pose_model_path=args.pose_model,
         face_model_path=args.face_model
     )
 
-    # 3. Initialize Tracking Components
     centroid_tracker = CentroidTracker(max_distance=0.15, max_missed_frames=20)
-    suspicion_tracker = StudentSuspicionTracker(threshold=0.6, required_frames=10)
-
-    # 4. Initialize Alerting & Logging
-    alarm = Alarm(sound_path=args.alarm_sound, cooldown_sec=2.0) if not args.no_alarm else None
-    logger = IncidentLogger(csv_filepath=args.output_csv, debounce_sec=5.0)
+    suspicion_tracker = StudentSuspicionTracker(threshold=0.55, required_frames=8)
+    logger = IncidentLogger(
+        csv_filepath=args.output_csv,
+        output_dir=args.snapshot_dir,
+        cooldown_sec=args.cooldown_sec
+    )
 
     total_frames = 0
     start_time = time.time()
     declared_fps = stream.get_declared_fps()
     frame_duration_ms = int(1000 / declared_fps)
 
-    print("[SYSTEM] Classroom Monitoring Pipeline Active. Press 'q' in video window to exit.\n")
+    print("[SYSTEM] Exam Hall Monitoring Active. Press 'q' in video window to exit.\n")
 
     try:
         while True:
             ret, frame = stream.read()
             if not ret or frame is None:
-                print("\n[INFO] End of stream or stream disconnected.")
+                print("\n[INFO] End of stream or video source closed.")
                 break
 
             total_frames += 1
             timestamp_ms = int(total_frames * frame_duration_ms)
             h_full, w_full = frame.shape[:2]
 
-            # Step 1: Detect persons & objects via YOLOv8 + MediaPipe
+            # 1. Run detection pipeline (YOLOv8 + MediaPipe Pose & Face)
             raw_detections = pipeline.process_frame(frame, timestamp_ms)
 
-            # Step 2: Convert to normalized records & update centroid tracking
+            # 2. Adapt landmarks & update centroid tracking
             records = adapt(raw_detections, full_w=w_full, full_h=h_full)
             centroids = [r["centroid"] for r in records if "centroid" in r]
             assignments = centroid_tracker.update(centroids)
 
             flagged_bboxes = []
-            has_alarm_this_frame = False
+            has_incident_this_frame = False
 
-            # Step 3: Evaluate student behavior & update suspicion scores
+            # 3. Evaluate student behavior vectors
             for det_idx, student_id in assignments.items():
                 if det_idx >= len(records):
                     continue
 
                 rec = records[det_idx]
-                yaw = rec.get("head_yaw_deg")
-                lean = rec.get("torso_lean_deg")
+                pitch = rec.get("head_pitch_deg", 0.0)
+                yaw = rec.get("head_yaw_deg", 0.0)
+                mouth = rec.get("mouth_open_ratio", 0.0)
+                lean = rec.get("torso_lean_deg", 0.0)
                 obj_near = rec.get("object_near_hand", False)
 
-                score, should_alert = suspicion_tracker.update(
+                score, should_alert, cheat_reason = suspicion_tracker.update(
                     student_id=student_id,
+                    head_pitch_deg=pitch,
                     head_yaw_deg=yaw,
+                    mouth_open_ratio=mouth,
                     torso_lean_deg=lean,
                     object_near_hand=obj_near
                 )
 
-                # Get pixel coordinates for bounding box
                 raw_bbox = rec.get("bbox")
                 if isinstance(raw_bbox, dict):
                     pixel_bbox = [
@@ -154,26 +155,39 @@ def main():
                     ]
 
                 if should_alert:
-                    has_alarm_this_frame = True
+                    has_incident_this_frame = True
                     flagged_bboxes.append(pixel_bbox)
 
-                    if alarm:
-                        alarm.trigger()
-                    logger.log_incident(student_id, score, yaw, lean, obj_near)
+                    # Log incident and save annotated snapshot (enforces 5s pause)
+                    logged, snapshot_path = logger.log_and_save_snapshot(
+                        frame=frame,
+                        student_id=student_id,
+                        score=score,
+                        cheat_reason=cheat_reason,
+                        pixel_bbox=pixel_bbox,
+                        metrics=rec
+                    )
 
-                draw_flag_overlay(frame, pixel_bbox, student_id, score, is_flagged=should_alert)
+                draw_flag_overlay(
+                    frame=frame,
+                    bbox=pixel_bbox,
+                    student_id=student_id,
+                    score=score,
+                    is_flagged=should_alert,
+                    cheat_reason=cheat_reason
+                )
 
-            # Step 4: Render UI dashboard & spotlight
+            # 4. Draw HUD dashboard & spotlight
             elapsed = time.time() - start_time
             fps = total_frames / max(elapsed, 1e-6)
 
             if flagged_bboxes:
                 frame = apply_spotlight(frame, flagged_bboxes, dim_factor=0.3)
 
-            draw_dashboard(frame, fps, len(assignments), has_alarm_this_frame)
+            draw_dashboard(frame, fps, len(assignments), has_incident_this_frame)
 
             if not args.no_display:
-                cv2.imshow("Classroom Monitoring System", frame)
+                cv2.imshow("Exam Hall Monitoring System", frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
 
