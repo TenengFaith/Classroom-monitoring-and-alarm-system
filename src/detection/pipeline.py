@@ -20,7 +20,7 @@ class ClassroomDetectionPipeline:
                  pose_model_path=None,
                  face_model_path=None,
                  confidence_threshold=0.25,
-                 crop_phone_conf=0.35,  # Filter out static desk objects (calculators, IDs, pens)
+                 crop_phone_conf=0.45,  # Higher threshold filters bags, calculators, desk items misclassified as phones
                  crop_padding=0.05,
                  yolo_input_width=1280,
                  crop_size_px=256,
@@ -81,23 +81,47 @@ class ClassroomDetectionPipeline:
         return frame[cy1:cy2, cx1:cx2], (cx1, cy1)
 
     def _is_phone_held_by_hand(self, phone_px_box, pose_landmarks, crop_w, crop_h):
+        """
+        Returns True ONLY if a detected object is actively held by a student's hand.
+        Three strict guards:
+        1. At least one visible wrist/hand landmark must exist.
+        2. The object box must be in the lower half of the crop (mid-body and below),
+           rejecting background objects like bags on hooks or objects on distant walls.
+        3. A wrist/hand landmark must be within a tight proximity of the object box
+           (not just loosely nearby).
+        """
         if not pose_landmarks or len(pose_landmarks) < 23:
             return False
 
         px1, py1, px2, py2 = phone_px_box
-        hand_indices = [15, 16, 17, 18, 19, 20, 21, 22]
-        margin = 20.0
+        obj_cy = (py1 + py2) / 2.0
 
+        # Guard 2: Reject if the object centre is in the top 40% of the crop
+        # (background bags, boards, hooks are almost always in the upper region)
+        if obj_cy < crop_h * 0.40:
+            return False
+
+        # Wrist / hand landmark indices
+        hand_indices = [15, 16, 17, 18, 19, 20, 21, 22]
+        margin = 15.0  # tight proximity margin in pixels
+
+        visible_hands = 0
         for idx in hand_indices:
             lm = pose_landmarks[idx]
-            if lm.get("visibility", 1.0) < 0.3:
+            if lm.get("visibility", 1.0) < 0.35:
                 continue
+            visible_hands += 1
 
             hx = lm["x"] * crop_w
             hy = lm["y"] * crop_h
 
             if (px1 - margin) <= hx <= (px2 + margin) and (py1 - margin) <= hy <= (py2 + margin):
                 return True
+
+        # Guard 1: If no hand landmarks were visible at all, we cannot confirm the
+        # object is being held — reject to avoid false positives.
+        if visible_hands == 0:
+            return False
 
         return False
 
