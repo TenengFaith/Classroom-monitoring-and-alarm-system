@@ -127,6 +127,8 @@ def main():
                 mouth = rec.get("mouth_open_ratio", 0.0)
                 lean = rec.get("torso_lean_deg", 0.0)
                 hands_under = rec.get("hands_under_desk", False)
+                hands_writing = rec.get("hands_in_writing_pos", True)
+                hands_moved = rec.get("hands_moved_away", False)
                 obj_near = rec.get("object_near_hand", False)
 
                 score, should_alert, cheat_reason = suspicion_tracker.update(
@@ -136,6 +138,8 @@ def main():
                     mouth_open_ratio=mouth,
                     torso_lean_deg=lean,
                     hands_under_desk=hands_under,
+                    hands_in_writing_pos=hands_writing,
+                    hands_moved_away=hands_moved,
                     object_near_hand=obj_near
                 )
 
@@ -160,7 +164,6 @@ def main():
                     has_incident_this_frame = True
                     flagged_bboxes.append(pixel_bbox)
 
-                    # Log incident and save annotated snapshot (enforces 5s pause)
                     logged, snapshot_path = logger.log_and_save_snapshot(
                         frame=frame,
                         student_id=student_id,

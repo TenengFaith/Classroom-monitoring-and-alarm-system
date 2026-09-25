@@ -24,7 +24,6 @@ RIGHT_CHEEK    = 454
 
 
 def _crop_lm_to_global(lm, crop_offset, crop_size, full_w, full_h):
-    """Transforms landmarks from crop-local coordinates to full-frame normalized coordinates."""
     cx, cy = crop_offset
     cw, ch = crop_size
 
@@ -65,8 +64,7 @@ def _bbox_center(bbox):
 
 def _shoulder_tilt_and_lean(landmarks):
     """
-    Calculates sideways torso lean / shoulder line tilt angle in degrees.
-    Detects when a student leans sideways completely away from their desk towards a peer.
+    Calculates shoulder tilt / torso lean angle in degrees.
     """
     if not landmarks or len(landmarks) < 13:
         return 0.0
@@ -84,10 +82,8 @@ def _shoulder_tilt_and_lean(landmarks):
     if abs(dx) < 1e-4:
         return 90.0
 
-    # Shoulder tilt angle from horizontal line
     tilt_deg = math.degrees(math.atan2(abs(dy), abs(dx)))
 
-    # Also check if hip landmarks are available for spine vector lean
     if len(landmarks) >= 25:
         lh = landmarks[LEFT_HIP]
         rh = landmarks[RIGHT_HIP]
@@ -120,11 +116,6 @@ def _head_yaw_deg_from_face(face_landmarks):
 
 
 def _head_pitch_deg(face_landmarks, pose_landmarks):
-    """
-    Estimates head pitch angle in degrees (downward tilt).
-    When student looks down into their lap / under desk:
-    - Pitch angle is positive (> 20-30 deg).
-    """
     if face_landmarks and len(face_landmarks) > 152:
         forehead = face_landmarks[FOREHEAD]
         nose = face_landmarks[NOSE_TIP]
@@ -169,14 +160,15 @@ def _mouth_openness_ratio(face_landmarks):
     return lip_dist / face_h
 
 
-def _is_hands_under_desk(pose_landmarks):
+def _classify_hand_positions(pose_landmarks):
     """
-    Detects if student's hands/wrists are positioned in their lap area / below desk height.
-    In crop coordinates (0..1 top to bottom), desk surface is at ~0.55-0.65.
-    When hands are in lap under desk, wrist landmark y > 0.60 or wrists are below elbows.
+    Classifies student hand positions:
+    - hands_under_desk: Wrists in lap area below desk level (y > 0.62).
+    - hands_in_writing_pos: Wrists positioned normally on top of desk writing surface.
+    - hands_moved_away: Wrists reached sideways outside desk writing bounds (reaching to grab/take something).
     """
     if not pose_landmarks or len(pose_landmarks) < 17:
-        return False
+        return False, True, False
 
     lw = pose_landmarks[LEFT_WRIST]
     rw = pose_landmarks[RIGHT_WRIST]
@@ -184,21 +176,31 @@ def _is_hands_under_desk(pose_landmarks):
     lw_vis = lw.get("visibility", 1.0)
     rw_vis = rw.get("visibility", 1.0)
 
-    # Check if left or right wrist is in crop lower half (lap region below desk)
+    # 1. Hands under desk (lap region)
     left_under = (lw_vis >= 0.3 and lw["y"] > 0.62)
     right_under = (rw_vis >= 0.3 and rw["y"] > 0.62)
 
-    # Also check if wrist is significantly lower than elbow (hanging down into lap)
     if len(pose_landmarks) >= 15:
         le = pose_landmarks[LEFT_ELBOW]
         re = pose_landmarks[RIGHT_ELBOW]
-
         if lw_vis >= 0.3 and le.get("visibility", 1.0) >= 0.3 and (lw["y"] - le["y"]) > 0.12:
             left_under = True
         if rw_vis >= 0.3 and re.get("visibility", 1.0) >= 0.3 and (rw["y"] - re["y"]) > 0.12:
             right_under = True
 
-    return left_under or right_under
+    hands_under = left_under or right_under
+
+    # 2. Hands in normal writing position on top of desk
+    left_writing = (lw_vis >= 0.3 and 0.38 <= lw["y"] <= 0.62 and 0.22 <= lw["x"] <= 0.78)
+    right_writing = (rw_vis >= 0.3 and 0.38 <= rw["y"] <= 0.62 and 0.22 <= rw["x"] <= 0.78)
+    hands_writing = left_writing or right_writing
+
+    # 3. Hands moved away / reaching sideways (reaching for something off the desk)
+    left_reaching = (lw_vis >= 0.3 and (lw["x"] < 0.20 or lw["x"] > 0.80 or lw["y"] < 0.30))
+    right_reaching = (rw_vis >= 0.3 and (rw["x"] < 0.20 or rw["x"] > 0.80 or rw["y"] < 0.30))
+    hands_moved_away = left_reaching or right_reaching
+
+    return hands_under, hands_writing, hands_moved_away
 
 
 def adapt(structured_output, full_w=1280, full_h=720):
@@ -237,7 +239,8 @@ def adapt(structured_output, full_w=1280, full_h=720):
         head_pitch = _head_pitch_deg(global_face_lm, global_pose_lm)
         mouth_ratio = _mouth_openness_ratio(global_face_lm) if global_face_lm else 0.0
         torso_lean = _shoulder_tilt_and_lean(raw_pose_lm) if raw_pose_lm else 0.0
-        hands_under = _is_hands_under_desk(raw_pose_lm) if raw_pose_lm else False
+
+        hands_under, hands_writing, hands_moved_away = _classify_hand_positions(raw_pose_lm) if raw_pose_lm else (False, True, False)
 
         records.append({
             "centroid": centroid,
@@ -246,6 +249,8 @@ def adapt(structured_output, full_w=1280, full_h=720):
             "mouth_open_ratio": mouth_ratio,
             "torso_lean_deg": torso_lean,
             "hands_under_desk": hands_under,
+            "hands_in_writing_pos": hands_writing,
+            "hands_moved_away": hands_moved_away,
             "object_near_hand": has_detected_phone,
             "pose_id": pose.get("pose_id"),
             "bbox": bbox,
